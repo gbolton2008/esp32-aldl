@@ -1,16 +1,18 @@
-/**
- * =============================================================================
- * ESP32 ALDL Wireless Bridge — GM 1227170 / Fiero 2.8L V6
- * 160-baud PWM ALDL decoder + BluetoothSerial bridge
- *
- * REVISION 7 — 0xAA 0x55 Hard Sync Header
- * =============================================================================
- */
-
-#include <Arduino.h>
-#include <BluetoothSerial.h>
+#include <string.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "esp_log.h"
 #include "esp_timer.h"
 #include "driver/gpio.h"
+#include "nvs_flash.h"
+#include "esp_bt.h"
+#include "esp_bt_main.h"
+#include "esp_bt_device.h"
+#include "esp_gap_bt_api.h"
+#include "esp_spp_api.h"
 
 #define ALDL_PIN             GPIO_NUM_4
 
@@ -26,7 +28,6 @@
 
 #define BT_DEVICE_NAME       "ESP32-ALDL"
 #define BT_QUEUE_DEPTH        4u
-#define DEBUG_LEVEL           2
 
 #define PC_GLITCH   ((uint8_t)0)
 #define PC_LOGIC_0  ((uint8_t)1)
@@ -37,6 +38,8 @@
 #define DS_HUNT_SYNC   ((uint8_t)0)
 #define DS_AWAIT_START ((uint8_t)1)
 #define DS_READ_BITS   ((uint8_t)2)
+
+static const char *TAG = "ALDL";
 
 struct BtFrame {
     uint8_t data[PAYLOAD_BYTES];
@@ -62,10 +65,12 @@ struct RingBuffer {
     volatile uint16_t tail;
 };
 
-static RingBuffer      rb;
-static DecoderContext  ctx;
-static BluetoothSerial SerialBT;
-static QueueHandle_t   bt_queue = nullptr;
+static struct RingBuffer      rb;
+static struct DecoderContext  ctx;
+static QueueHandle_t          bt_queue = NULL;
+
+static uint32_t spp_handle = 0;
+static bool     bt_connected = false;
 
 #define RB_MASK ((uint16_t)255u)
 
@@ -77,21 +82,17 @@ static inline void IRAM_ATTR rb_push(uint32_t v) {
     rb.head = next;
 }
 
-static inline bool rb_pop(uint32_t &out) {
+static inline bool rb_pop(uint32_t *out) {
     if (rb.tail == rb.head) return false;
-    out = rb.data[rb.tail];
+    *out = rb.data[rb.tail];
     __asm__ __volatile__("" ::: "memory");
     rb.tail = (rb.tail + 1u) & RB_MASK;
     return true;
 }
 
-static inline uint16_t rb_available() {
-    return (rb.head - rb.tail) & RB_MASK;
-}
-
 static volatile uint64_t isr_fall_us = 0;
 
-static void IRAM_ATTR aldl_gpio_isr(void* /*arg*/) {
+static void IRAM_ATTR aldl_gpio_isr(void* arg) {
     uint64_t now = (uint64_t)esp_timer_get_time();
     if (gpio_get_level((gpio_num_t)ALDL_PIN) == 0) {
         isr_fall_us = now;
@@ -111,7 +112,7 @@ static uint8_t classify_pulse(uint32_t us) {
     return PC_LOGIC_1;
 }
 
-static void reset_decoder() {
+static void reset_decoder(void) {
     ctx.state           = DS_HUNT_SYNC;
     ctx.sync_count      = 0;
     ctx.bit_count       = 0;
@@ -121,25 +122,22 @@ static void reset_decoder() {
     ctx.bytes_this_frame = 0;
 }
 
-static void enqueue_frame() {
-    BtFrame f;
+static void enqueue_frame(void) {
+    struct BtFrame f;
     memcpy(f.data, ctx.frame, PAYLOAD_BYTES);
     f.len = PAYLOAD_BYTES;
     if (xQueueSend(bt_queue, &f, 0) != pdTRUE) {
-        if (DEBUG_LEVEL >= 1) Serial.println(F("[WARN] BT queue full"));
+        ESP_LOGW(TAG, "BT queue full");
     }
 }
 
-static void print_frame() {
-    Serial.print(F("[FRAME #"));
-    Serial.print(ctx.frames_decoded);
-    Serial.print(F("] "));
+static void print_frame(void) {
+    char hex_str[ PAYLOAD_BYTES * 3 + 1 ];
+    int offset = 0;
     for (uint8_t i = 0; i < PAYLOAD_BYTES; i++) {
-        if (ctx.frame[i] < 0x10) Serial.print('0');
-        Serial.print(ctx.frame[i], HEX);
-        if (i < PAYLOAD_BYTES - 1) Serial.print(' ');
+        offset += sprintf(hex_str + offset, "%02X ", ctx.frame[i]);
     }
-    Serial.println();
+    ESP_LOGI(TAG, "[FRAME #%lu] %s", ctx.frames_decoded, hex_str);
 }
 
 static void feed_bit(uint8_t pc) {
@@ -188,7 +186,7 @@ static void feed_bit(uint8_t pc) {
                 
                 if (ctx.byte_count >= PAYLOAD_BYTES) {
                     ctx.frames_decoded++;
-                    if (DEBUG_LEVEL >= 1) print_frame();
+                    print_frame();
                     enqueue_frame();
                     reset_decoder();
                 } else {
@@ -224,12 +222,8 @@ static void process_pulse(uint32_t pulse_us) {
     feed_bit(pc);
 }
 
-// ---------------------------------------------------------------------------
-// ── BT transmit task (Core 0) ────────────────────────────────────────────────
-// ---------------------------------------------------------------------------
-
-static void btTransmitTask(void* /*pvParameters*/) {
-    BtFrame f;
+static void btTransmitTask(void* pvParameters) {
+    struct BtFrame f;
     
     // The 2-byte hard-sync header that ALDLDroid will lock onto
     uint8_t tx_buffer[PAYLOAD_BYTES + 2];
@@ -238,21 +232,21 @@ static void btTransmitTask(void* /*pvParameters*/) {
     
     for (;;) {
         if (xQueueReceive(bt_queue, &f, portMAX_DELAY) == pdTRUE) {
-            if (SerialBT.connected()) {
+            if (bt_connected && spp_handle != 0) {
                 // Copy the 25 decoded bytes immediately after the header
                 memcpy(&tx_buffer[2], f.data, f.len);
                 // Transmit the 27-byte locked packet
-                SerialBT.write(tx_buffer, f.len + 2);
+                esp_spp_write(spp_handle, f.len + 2, tx_buffer);
             }
         }
     }
 }
 
-static void aldlDecodeTask(void* /*pvParameters*/) {
+static void aldlDecodeTask(void* pvParameters) {
     uint32_t pulse_us = 0;
     for (;;) {
         bool did_work = false;
-        while (rb_pop(pulse_us)) {
+        while (rb_pop(&pulse_us)) {
             process_pulse(pulse_us);
             did_work = true;
         }
@@ -260,24 +254,114 @@ static void aldlDecodeTask(void* /*pvParameters*/) {
     }
 }
 
-static void statusTask(void* /*pvParameters*/) {
+static void statusTask(void* pvParameters) {
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(5000));
-        Serial.print(F("[STATUS] frames="));
-        Serial.print(ctx.frames_decoded);
-        Serial.print(F(" bt="));
-        Serial.println(SerialBT.connected() ? F("UP") : F("waiting"));
+        ESP_LOGI(TAG, "[STATUS] frames=%lu bt=%s",
+                 ctx.frames_decoded,
+                 bt_connected ? "UP" : "waiting");
     }
 }
 
-void setup() {
-    Serial.begin(115200);
-    delay(500);
+static void esp_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param) {
+    switch (event) {
+    case ESP_SPP_INIT_EVT:
+        ESP_LOGI(TAG, "ESP_SPP_INIT_EVT");
+        esp_spp_start_srv(ESP_SPP_SEC_NONE, ESP_SPP_ROLE_SLAVE, 0, "SPP_SERVER");
+        break;
+    case ESP_SPP_DISCOVERY_COMP_EVT:
+        ESP_LOGI(TAG, "ESP_SPP_DISCOVERY_COMP_EVT");
+        break;
+    case ESP_SPP_OPEN_EVT:
+        ESP_LOGI(TAG, "ESP_SPP_OPEN_EVT");
+        break;
+    case ESP_SPP_CLOSE_EVT:
+        ESP_LOGI(TAG, "ESP_SPP_CLOSE_EVT");
+        spp_handle = 0;
+        bt_connected = false;
+        break;
+    case ESP_SPP_START_EVT:
+        ESP_LOGI(TAG, "ESP_SPP_START_EVT");
+        esp_bt_dev_set_device_name(BT_DEVICE_NAME);
+        esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
+        break;
+    case ESP_SPP_CL_INIT_EVT:
+        ESP_LOGI(TAG, "ESP_SPP_CL_INIT_EVT");
+        break;
+    case ESP_SPP_DATA_IND_EVT:
+        ESP_LOGI(TAG, "ESP_SPP_DATA_IND_EVT len=%d, handle=%lu",
+                 param->data_ind.len, (unsigned long)param->data_ind.handle);
+        break;
+    case ESP_SPP_CONG_EVT:
+        ESP_LOGI(TAG, "ESP_SPP_CONG_EVT");
+        break;
+    case ESP_SPP_WRITE_EVT:
+        break;
+    case ESP_SPP_SRV_OPEN_EVT:
+        ESP_LOGI(TAG, "ESP_SPP_SRV_OPEN_EVT");
+        spp_handle = param->srv_open.handle;
+        bt_connected = true;
+        break;
+    case ESP_SPP_SRV_STOP_EVT:
+        ESP_LOGI(TAG, "ESP_SPP_SRV_STOP_EVT");
+        break;
 
-    Serial.println(F("============================================"));
-    Serial.println(F(" ESP32 ALDL Bridge — GM 1227170 Fiero 2.8  "));
-    Serial.println(F(" 160-baud PWM — AA55 Hard Sync Active       "));
-    Serial.println(F("============================================"));
+    default:
+        break;
+    }
+}
+
+void app_main(void) {
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_BLE));
+
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    if ((ret = esp_bt_controller_init(&bt_cfg)) != ESP_OK) {
+        ESP_LOGE(TAG, "%s initialize controller failed: %s\n", __func__, esp_err_to_name(ret));
+        return;
+    }
+
+    if ((ret = esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT)) != ESP_OK) {
+        ESP_LOGE(TAG, "%s enable controller failed: %s\n", __func__, esp_err_to_name(ret));
+        return;
+    }
+
+    esp_bluedroid_config_t bluedroid_cfg = BT_BLUEDROID_INIT_CONFIG_DEFAULT();
+    if ((ret = esp_bluedroid_init_with_cfg(&bluedroid_cfg)) != ESP_OK) {
+        ESP_LOGE(TAG, "%s initialize bluedroid failed: %s\n", __func__, esp_err_to_name(ret));
+        return;
+    }
+
+    if ((ret = esp_bluedroid_enable()) != ESP_OK) {
+        ESP_LOGE(TAG, "%s enable bluedroid failed: %s\n", __func__, esp_err_to_name(ret));
+        return;
+    }
+
+    if ((ret = esp_spp_register_callback(esp_spp_cb)) != ESP_OK) {
+        ESP_LOGE(TAG, "%s spp register failed: %s\n", __func__, esp_err_to_name(ret));
+        return;
+    }
+
+    esp_spp_cfg_t spp_cfg = {
+        .mode = ESP_SPP_MODE_CB,
+        .enable_l2cap_ertm = true,
+        .tx_buffer_size = 0,
+    };
+    if ((ret = esp_spp_enhanced_init(&spp_cfg)) != ESP_OK) {
+        ESP_LOGE(TAG, "%s spp init failed: %s\n", __func__, esp_err_to_name(ret));
+        return;
+    }
+
+    ESP_LOGI(TAG, "============================================");
+    ESP_LOGI(TAG, " ESP32 ALDL Bridge — GM 1227170 Fiero 2.8  ");
+    ESP_LOGI(TAG, " 160-baud PWM — AA55 Hard Sync Active       ");
+    ESP_LOGI(TAG, "============================================");
 
     memset(&rb,  0, sizeof(rb));
     memset(&ctx, 0, sizeof(ctx));
@@ -292,21 +376,11 @@ void setup() {
     gpio_config(&io);
 
     gpio_install_isr_service(ESP_INTR_FLAG_IRAM | ESP_INTR_FLAG_LEVEL3);
-    gpio_isr_handler_add((gpio_num_t)ALDL_PIN, aldl_gpio_isr, nullptr);
-    
-    if (!SerialBT.begin(BT_DEVICE_NAME)) {
-        for (;;) delay(1000);
-    }
-    Serial.print(F("[BT] Advertising as: "));
-    Serial.println(F(BT_DEVICE_NAME));
+    gpio_isr_handler_add((gpio_num_t)ALDL_PIN, aldl_gpio_isr, NULL);
 
-    bt_queue = xQueueCreate(BT_QUEUE_DEPTH, sizeof(BtFrame));
+    bt_queue = xQueueCreate(BT_QUEUE_DEPTH, sizeof(struct BtFrame));
 
-    xTaskCreatePinnedToCore(aldlDecodeTask, "aldlDecode", 4096, nullptr, 3, nullptr, 0);
-    xTaskCreatePinnedToCore(btTransmitTask, "btTx",       4096, nullptr, 2, nullptr, 0);
-    xTaskCreatePinnedToCore(statusTask,     "status",     2048, nullptr, 1, nullptr, 0);
-}
-
-void loop() {
-    vTaskDelay(pdMS_TO_TICKS(100));
+    xTaskCreatePinnedToCore(aldlDecodeTask, "aldlDecode", 4096, NULL, 3, NULL, 0);
+    xTaskCreatePinnedToCore(btTransmitTask, "btTx",       4096, NULL, 2, NULL, 0);
+    xTaskCreatePinnedToCore(statusTask,     "status",     2048, NULL, 1, NULL, 0);
 }
