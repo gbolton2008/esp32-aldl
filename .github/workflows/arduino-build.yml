@@ -25,7 +25,7 @@ jobs:
           echo "Build version (commit ID): $(cat version.txt)"
 
       - name: Compile Arduino Sketch
-        uses: arduino/compile-action@v1
+        uses: arduino/compile-sketches@v1
         with:
           fqbn: esp32:esp32:esp32
           platforms: |
