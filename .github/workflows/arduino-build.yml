@@ -1,0 +1,62 @@
+name: Build and Package Arduino Firmware
+
+on:
+  push:
+    branches:
+      - '*'
+  pull_request:
+    branches:
+      - '*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Configure Safe Directory
+        run: |
+          git config --global --add safe.directory "*"
+
+      - name: Set Version Identifier
+        run: |
+          git rev-parse --short HEAD > version.txt
+          echo "Build version (commit ID): $(cat version.txt)"
+
+      - name: Compile Arduino Sketch
+        uses: arduino/compile-action@v1
+        with:
+          fqbn: esp32:esp32:esp32
+          platforms: |
+            - name: esp32:esp32
+              source-url: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          sketch-paths: |
+            .
+          cli-compile-flags: |
+            - --export-binaries
+
+      - name: Stage Firmware Binaries
+        run: |
+          mkdir -p dist
+          # The action exports the compiled .bin file into the build directory
+          find build -name "*.bin" -exec cp {} dist/ \;
+
+      - name: Create Flashing Instructions Document
+        run: |
+          cat << 'EOF' > dist/README_FLASHING.txt
+          ESP32 ALDL Bridge Arduino Firmware Flash Instructions
+          ===================================================
+
+          You can flash the compiled .bin file using esptool.py or any generic ESP32 flashing tool.
+          EOF
+
+      - name: Package Release
+        run: |
+          tar -czvf esp32-aldl-arduino-firmware.tar.gz -C dist .
+
+      - name: Upload Firmware Package
+        uses: actions/upload-artifact@v3
+        with:
+          name: esp32-aldl-arduino-firmware-${{ github.sha }}
+          path: esp32-aldl-arduino-firmware.tar.gz
