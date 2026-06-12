@@ -10,7 +10,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: espressif/idf:release-v5.2
+    container: espressif/idf:v5.2.1
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v3
