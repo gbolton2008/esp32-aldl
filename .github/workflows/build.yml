@@ -13,7 +13,7 @@ jobs:
     container: espressif/idf:v5.2.1
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           submodules: recursive
 
@@ -23,24 +23,19 @@ jobs:
 
       - name: Set Version Identifier
         run: |
-          git rev-parse --short HEAD > version.txt
-          echo "Build version (commit ID): $(cat version.txt)"
+          git rev-parse --short HEAD > version.txt && echo "Build version (commit ID): $(cat version.txt)"
 
       - name: Build and Run Host Unit Tests
         run: |
-          cmake -S tests -B tests/build
-          cmake --build tests/build
-          ./tests/build/test_decoder
+          cmake -S tests -B tests/build && cmake --build tests/build && ./tests/build/test_decoder
 
       - name: Build Firmware
         run: |
-          . $IDF_PATH/export.sh
-          idf.py build
+          . $IDF_PATH/export.sh && idf.py build
 
       - name: Create Flashing Instructions Document
         run: |
-          mkdir -p dist
-          cat << 'EOF' > dist/README_FLASHING.txt
+          mkdir -p dist && cat << 'EOF' > dist/README_FLASHING.txt
           ESP32 ALDL Bridge Firmware Flash Instructions
           =============================================
 
@@ -55,16 +50,29 @@ jobs:
 
       - name: Stage Firmware Binaries
         run: |
-          cp build/esp32-aldl.bin dist/
-          cp build/bootloader/bootloader.bin dist/
-          cp build/partition_table/partition-table.bin dist/
+          cp build/esp32-aldl.bin dist/ && cp build/bootloader/bootloader.bin dist/ && cp build/partition_table/partition-table.bin dist/
 
       - name: Package Release
         run: |
           tar -czvf esp32-aldl-firmware.tar.gz -C dist .
 
-      - name: Upload Firmware Package
+      # ---------------------------------------------------------------
+      # Conditional Artifact Uploads for Cross-Platform Compatibility
+      # ---------------------------------------------------------------
+
+      - name: Upload Firmware Package (GitHub)
+        if: ${{ github.server_url == 'https://github.com' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-aldl-firmware-${{ github.sha }}
+          path: esp32-aldl-firmware.tar.gz
+          if-no-files-found: error
+
+      - name: Upload Firmware Package (Gitea)
+        if: ${{ github.server_url != 'https://github.com' }}
         uses: actions/upload-artifact@v3
         with:
           name: esp32-aldl-firmware-${{ github.sha }}
           path: esp32-aldl-firmware.tar.gz
+          if-no-files-found: error
+          
