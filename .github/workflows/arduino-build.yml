@@ -2,18 +2,17 @@ name: Build and Package Arduino Firmware
 
 on:
   push:
-    branches:
-      - '*'
-  pull_request:
-    branches:
-      - '*'
+    tags:
+      - 'v*'
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Configure Safe Directory
         run: |
@@ -21,8 +20,9 @@ jobs:
 
       - name: Set Version Identifier
         run: |
-          git rev-parse --short HEAD > version.txt
-          echo "Build version (commit ID): $(cat version.txt)"
+          TAG=${GITHUB_REF#refs/tags/}
+          echo "$TAG" > version.txt
+          echo "Build version (tag): $TAG"
 
       - name: Compile Arduino Sketch
         uses: arduino/compile-sketches@v1
@@ -53,10 +53,53 @@ jobs:
 
       - name: Package Release
         run: |
-          tar -czvf esp32-aldl-arduino-firmware.tar.gz -C dist .
+          TAG=${GITHUB_REF#refs/tags/}
+          tar -czvf "esp32-aldl-${TAG}.tar.gz" -C dist .
 
       - name: Upload Firmware Package
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: esp32-aldl-arduino-firmware-${{ github.sha }}
-          path: esp32-aldl-arduino-firmware.tar.gz
+          path: esp32-aldl-*.tar.gz
+          if-no-files-found: error
+
+      - name: Create Release and Upload Asset
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_URL: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          FILE="esp32-aldl-${TAG}.tar.gz"
+          NAME="${TAG}"
+
+          # 1. Create the release
+          RESP=$(curl -s -H "Authorization: token $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag_name\":\"$TAG\",\"name\":\"$NAME\",\"body\":\"Release $TAG\"}" \
+            "$API_URL/repos/$REPO/releases")
+
+          # 2. Extract upload endpoint
+          UPLOAD_URL=$(echo "$RESP" | jq -r '.upload_url // empty')
+          RELEASE_ID=$(echo "$RESP" | jq -r '.id // empty')
+
+          # 3. Upload asset
+          if [ -n "$UPLOAD_URL" ]; then
+            # GitHub style (upload_url contains {?name,label})
+            UPLOAD_URL="${UPLOAD_URL%\{?name,label\}}"
+            curl -s -H "Authorization: token $TOKEN" \
+              -H "Content-Type: application/gzip" \
+              --data-binary @$FILE \
+              "${UPLOAD_URL}?name=${FILE}"
+          elif [ -n "$RELEASE_ID" ]; then
+            # Gitea style (POST to /releases/{id}/assets)
+            curl -s -H "Authorization: token $TOKEN" \
+              -H "Content-Type: application/gzip" \
+              --data-binary @$FILE \
+              "$API_URL/repos/$REPO/releases/$RELEASE_ID/assets?name=${FILE}"
+          else
+            echo "Failed to create release"
+            echo "$RESP"
+            exit 1
+          fi
+
