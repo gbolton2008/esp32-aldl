@@ -18,20 +18,16 @@ jobs:
           submodules: recursive
 
       - name: Configure Safe Directory
-        run: |
-          git config --global --add safe.directory "*"
+        run: git config --global --add safe.directory "*"
 
       - name: Set Version Identifier
-        run: |
-          git rev-parse --short HEAD > version.txt && echo "Build version (commit ID): $(cat version.txt)"
+        run: git rev-parse --short HEAD > version.txt && echo "Build version (commit ID): $(cat version.txt)"
 
       - name: Build and Run Host Unit Tests
-        run: |
-          cmake -S tests -B tests/build && cmake --build tests/build && ./tests/build/test_decoder
+        run: cmake -S tests -B tests/build && cmake --build tests/build && ./tests/build/test_decoder
 
       - name: Build Firmware
-        run: |
-          . $IDF_PATH/export.sh && idf.py build
+        run: . $IDF_PATH/export.sh && idf.py build
 
       - name: Create Flashing Instructions Document
         run: |
@@ -49,28 +45,13 @@ jobs:
           EOF
 
       - name: Stage Firmware Binaries
-        run: |
-          cp build/esp32-aldl.bin dist/ && cp build/bootloader/bootloader.bin dist/ && cp build/partition_table/partition-table.bin dist/
+        run: cp build/esp32-aldl.bin dist/ && cp build/bootloader/bootloader.bin dist/ && cp build/partition_table/partition-table.bin dist/
 
       - name: Package Release
-        run: |
-          tar -czvf esp32-aldl-firmware.tar.gz -C dist .
+        run: tar -czvf esp32-aldl-firmware.tar.gz -C dist .
 
-      # ---------------------------------------------------------------
-      # Conditional Artifact Uploads for Cross-Platform Compatibility
-      # ---------------------------------------------------------------
-
-      - name: Upload Firmware Package (GitHub)
-        if: ${{ github.server_url == 'https://github.com' }}
+      - name: Upload Firmware Package
         uses: actions/upload-artifact@v4
-        with:
-          name: esp32-aldl-firmware-${{ github.sha }}
-          path: esp32-aldl-firmware.tar.gz
-          if-no-files-found: error
-
-      - name: Upload Firmware Package (Gitea)
-        if: ${{ github.server_url != 'https://github.com' }}
-        uses: actions/upload-artifact@v3
         with:
           name: esp32-aldl-firmware-${{ github.sha }}
           path: esp32-aldl-firmware.tar.gz
