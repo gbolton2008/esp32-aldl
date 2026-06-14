@@ -25,9 +25,9 @@ jobs:
       - name: Set Version Identifier
         run: |
           git rev-parse --short HEAD > version.txt && echo "Build version (commit ID): $(cat version.txt)"
-
+          
       - name: Build and Run Host Unit Tests
-        run: cmake -S tests -B tests/build && cmake --build tests/build && ./tests/build/test_decoder
+        run: . $IDF_PATH/export.sh && cmake -S tests -B tests/build && cmake --build tests/build && ./tests/build/test_decoder
 
       - name: Build Firmware
         run: . $IDF_PATH/export.sh && idf.py build
