@@ -69,6 +69,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: esp32-aldl-firmware.tar.gz
-          generate_release_notes: true
+        
           
           
