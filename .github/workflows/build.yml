@@ -13,8 +13,8 @@ jobs:
     container: espressif/idf:v5.2.1
     steps:
       - name: Install Modern Node.js (Gitea Compatibility)
-        run: sudo apt-get update && sudo apt-get install -y ca-certificates curl gnupg && curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs
-    
+        run: apt-get update && apt-get install -y ca-certificates curl gnupg && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs
+        
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
