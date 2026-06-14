@@ -21,7 +21,8 @@ jobs:
         run: git config --global --add safe.directory "*"
 
       - name: Set Version Identifier
-        run: git rev-parse --short HEAD > version.txt && echo "Build version (commit ID): $(cat version.txt)"
+        run: |
+          git rev-parse --short HEAD > version.txt && echo "Build version (commit ID): $(cat version.txt)"
 
       - name: Build and Run Host Unit Tests
         run: cmake -S tests -B tests/build && cmake --build tests/build && ./tests/build/test_decoder
