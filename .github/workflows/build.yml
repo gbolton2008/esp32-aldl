@@ -2,8 +2,6 @@ name: Build and Package Firmware
 
 on:
   push:
-    branches:
-      - '*'
     tags:
       - 'v*'
 
@@ -13,11 +11,11 @@ jobs:
     container: espressif/idf:v5.2.1
     permissions:
       contents: write
-      
+
     steps:
-      - name: Install Modern Node.js (Gitea Compatibility)
-        run: apt-get update && apt-get install -y ca-certificates curl gnupg && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs
-        
+      - name: Install Modern Node.js and jq (Gitea Compatibility)
+        run: apt-get update && apt-get install -y ca-certificates curl gnupg jq && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs
+
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
@@ -28,8 +26,10 @@ jobs:
 
       - name: Set Version Identifier
         run: |
-          git rev-parse --short HEAD > version.txt && echo "Build version (commit ID): $(cat version.txt)"
-          
+          TAG=${GITHUB_REF#refs/tags/}
+          echo "$TAG" > version.txt
+          echo "Build version (tag): $TAG"
+
       - name: Build and Run Host Unit Tests
         run: . $IDF_PATH/export.sh && cmake -S tests -B tests/build && cmake --build tests/build && ./tests/build/test_decoder
 
@@ -55,19 +55,53 @@ jobs:
         run: cp build/esp32-aldl.bin dist/ && cp build/bootloader/bootloader.bin dist/ && cp build/partition_table/partition-table.bin dist/
 
       - name: Package Release
-        run: tar -czvf esp32-aldl-firmware.tar.gz -C dist .
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          tar -czvf "esp32-aldl-${TAG}.tar.gz" -C dist .
 
       - name: Upload Firmware Package
         uses: actions/upload-artifact@v4
         with:
           name: esp32-aldl-firmware-${{ github.sha }}
-          path: esp32-aldl-firmware.tar.gz
+          path: esp32-aldl-*.tar.gz
           if-no-files-found: error
 
       - name: Create Release and Upload Asset
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: esp32-aldl-firmware.tar.gz
-          generate_release_notes: true
-          
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_URL: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          FILE="esp32-aldl-${TAG}.tar.gz"
+          NAME="${TAG}"
+
+          # 1. Create the release
+          RESP=$(curl -s -H "Authorization: token $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag_name\":\"$TAG\",\"name\":\"$NAME\",\"body\":\"Release $TAG\"}" \
+            "$API_URL/repos/$REPO/releases")
+
+          # 2. Extract upload endpoint
+          UPLOAD_URL=$(echo "$RESP" | jq -r '.upload_url // empty')
+          RELEASE_ID=$(echo "$RESP" | jq -r '.id // empty')
+
+          # 3. Upload asset
+          if [ -n "$UPLOAD_URL" ]; then
+            # GitHub style (upload_url contains {?name,label})
+            UPLOAD_URL="${UPLOAD_URL%\{?name,label\}}"
+            curl -s -H "Authorization: token $TOKEN" \
+              -H "Content-Type: application/gzip" \
+              --data-binary @$FILE \
+              "${UPLOAD_URL}?name=${FILE}"
+          elif [ -n "$RELEASE_ID" ]; then
+            # Gitea style (POST to /releases/{id}/assets)
+            curl -s -H "Authorization: token $TOKEN" \
+              -H "Content-Type: application/gzip" \
+              --data-binary @$FILE \
+              "$API_URL/repos/$REPO/releases/$RELEASE_ID/assets?name=${FILE}"
+          else
+            echo "Failed to create release"
+            echo "$RESP"
+            exit 1
+          fi
