@@ -57,13 +57,6 @@ jobs:
           TAG=${GITHUB_REF#refs/tags/}
           tar -czvf "esp32-aldl-${TAG}.tar.gz" -C dist .
 
-      - name: Upload Firmware Package
-        uses: actions/upload-artifact@v4
-        with:
-          name: esp32-aldl-arduino-firmware-${{ github.sha }}
-          path: esp32-aldl-*.tar.gz
-          if-no-files-found: error
-
       - name: Create Release and Upload Asset
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
