@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     container: espressif/idf:v5.2.1
     steps:
+      - name: Install Node.js (Gitea Compatibility)
+        run: apt-get update && apt-get install -y nodejs
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
