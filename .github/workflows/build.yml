@@ -27,6 +27,7 @@ jobs:
       - name: Set Version Identifier
         run: |
           TAG=${GITHUB_REF#refs/tags/}
+          echo "TAG=$TAG" >> $GITHUB_ENV
           echo "$TAG" > version.txt
           echo "Build version (tag): $TAG"
 
@@ -56,7 +57,7 @@ jobs:
 
       - name: Package Release
         run: |
-          TAG=${GITHUB_REF#refs/tags/}
+          echo "Packaging with TAG: $TAG"
           tar -czvf "esp32-aldl-${TAG}.tar.gz" -C dist .
 
       - name: Upload Firmware Package
@@ -71,10 +72,11 @@ jobs:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
           API_URL: ${{ github.api_url }}
           REPO: ${{ github.repository }}
+          TAG: ${{ env.TAG }}
         run: |
-          TAG=${GITHUB_REF#refs/tags/}
           FILE="esp32-aldl-${TAG}.tar.gz"
           NAME="${TAG}"
+          echo "Creating release with FILE: $FILE, NAME: $NAME"
 
           # 1. Create the release
           RESP=$(curl -s -H "Authorization: token $TOKEN" \
