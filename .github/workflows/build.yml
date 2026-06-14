@@ -11,6 +11,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     container: espressif/idf:v5.2.1
+    permissions:
+      contents: write
+      
     steps:
       - name: Install Modern Node.js (Gitea Compatibility)
         run: apt-get update && apt-get install -y ca-certificates curl gnupg && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs
@@ -60,4 +63,11 @@ jobs:
           name: esp32-aldl-firmware-${{ github.sha }}
           path: esp32-aldl-firmware.tar.gz
           if-no-files-found: error
+
+      - name: Create Release and Upload Asset
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: esp32-aldl-firmware.tar.gz
+          generate_release_notes: true
           
